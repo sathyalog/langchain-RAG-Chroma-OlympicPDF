@@ -1,77 +1,76 @@
- 📚 Olympic PDF RAG Pipeline with LangChain, Chroma & Claude
+## 📚 Multi-Country Olympic PDF RAG Pipeline (Production-Grade Architecture)
+A lightweight, enterprise-ready Retrieval-Augmented Generation (RAG) system built with Python, LangChain, Chroma DB, HuggingFace, and Anthropic's Claude 3.
 
- How did I generated PDF?
- I used Gemini to generate a PDF file with Olympic data from 1900 to till date for 4 countries i.e., India, UK, USA & China.
+#### 💡 Origin & Project Inspiration
+"With the Olympics currently happening, I wanted to build a domain-specific search system to query historical medal records across countries. Instead of just building a simple single-document RAG, I challenged myself to design a multi-document system architecture capable of scaling to all 200+ competing nations without needing any future logic rewrites or new database clusters."
 
+#### 📄 Dataset Creation & Genesis
+Because real-world web PDFs are often noisy, poorly formatted, or buried across hundreds of sites, I conceptualized and built my own structured dataset from scratch:
+⚬	**Generation Method:** Initially, Used Google Gemini to generate clean, text-searchable historical data spanning 1900 to present for 4 initial countries: India 🇮🇳, Great Britain 🇬🇧, USA 🇺🇸, and China 🇨🇳.
+⚬	**Future-Proofing:**  Formatted the dataset explicitly to test clean text-splitting and metadata isolation before scaling to more nations.
+
+This is an output of a single PDF document reading(Simple system): 
  ![output](<Screenshot 2026-08-03 at 9.35.43 PM.png>)
 
- Now I want to convert this application to real-time enterprise systems handle multi-document/multi-entity RAG. We can achieve this by following  Single-Index Metadata-Filtered RAG pattern .
+ Now I want to convert this application to real-time enterprise systems handle multi-document/multi-entity RAG. We can achieve this by following  **Single-Index Metadata-Filtered RAG** pattern .
 
- [ User Prompt ] 
-       │
-       ▼
-[ Step 2: Metadata Router ] ── (Extracts: {"country": "India"})
-       │
-       ▼
-[ Step 3: Filtered Vector Search ] ── (Queries ChromaDB with filter={"country": "India"})
-       │
-       ▼
-[ Step 4: RAG Generation Chain ] ── (Passes filtered context to Claude)
+ I added 2 more countries and total 6 countries with separate PDF's like Olympic_india.pdf, Olympic_uk.pdf, Olympic_usa.pdf, Olympic_germany.pdf, Olympic_japan.pdf, Olympics_china.pdf and not single PDF(Olympics.pdf).
 
-📋 Step-by-Step Technical Implementation
-Step 1: Ingestion Pipeline with Enriched Metadata
-Instead of saving vectors into separate folders, process all PDFs through an ingestion pipeline that attaches a country tag to every single chunk before storing them in one shared Chroma database.
-	1.	Load each PDF file.
-	2.	Split the PDF into standard chunks (RecursiveCharacterTextSplitter).
-	3.	Attach metadata: Inject {"country": ""} into each chunk's metadata dictionary.
-	4.	Add all chunks from all PDFs into a single Chroma collection.
-Key Technical Concept:
-When LangChain stores documents in Chroma DB, each document payload looks like this under the hood:
+ #### 🏗️ From Idea to Production Architecture
+The Naive Approach vs. Production Standard
+⚬	❌ The Naive Prototype: Create separate vector databases for every country file, or spin up complex LLM tool-calling agents to choose files. (This inflates hosting costs, introduces huge latency, and breaks when scaling to 100+ countries).
+⚬	✅ The Production Standard (Implemented Here): Use a Single-Index Metadata-Filtered RAG Pattern. All country PDFs live in one unified vector database, with chunks tagged using metadata like {"country": "India"}. Chroma DB filters vectors at the hardware level during graph traversal.
+
+#### 🛠️ System Architecture Flow
+                                [ User Prompt ]
+                                       │
+                                       ▼
+                         [ Step 1: Metadata Router ] 
+                    (Extracts: {"country": "India"} via Pydantic)
+                                       │
+                                       ▼
+                   [ Step 2: Filtered Vector Retrieval ] 
+               (Queries ChromaDB with filter={"country": "India"})
+                                       │
+                                       ▼
+                      [ Step 3: RAG Generation Chain ] 
+                   (Passes grounded context to Claude 3)
+
+####  🚀 Technical Implementation Steps
+**Step 1:** Unified Ingestion with Enriched Metadata
+Instead of creating isolated databases, all PDF documents (olympics_india.pdf, olympics_uk.pdf, etc.) are processed through a single ingestion pipeline. Every chunk receives strict metadata prior to vector storage:
+```
 Document(
     page_content="Neeraj Chopra won Silver in Javelin...",
-    metadata={"country": "India", "source": "olympics_india.pdf", "page": 1}
+    metadata={"country": "India", "source": "olympics_india.pdf"}
 )
+```
 
-Step 2: Build a Fast Metadata Router
-Create a lightweight extraction step that inspects the incoming user query and identifies which country the user is asking about.
-	1.	Option A (Deterministic / NER): Check if any known country keyword exists inside the string query.
-	2.	Option B (Structured LLM Output): Use LangChain's .with_structured_output() (or a fast lightweight model like claude-3-haiku-20240307) with a simple schema (e.g., Pydantic model containing country_name: str).
-Example Logic Output:
-⚬	User Query: "List 2012 UK silver medals"
+**Step 2:** Lightweight Intent Routing
+When a prompt comes in, a fast, lightweight router inspects the user string and extracts the targeted entity:
+⚬	User Prompt: "List 2012 UK silver medals"
 ⚬	Router Output: "UK"
-Step 3: Execute Filtered Retrieval
-Instead of calling a different database for every country, pass the extracted country name into Chroma DB as a Search Filter.
-	1.	Define a retriever from your single Chroma DB store.
-	2.	Pass search arguments dynamically containing the metadata constraint:
-# Chroma DB metadata filter format
+Production Note: Router logic can utilize fast string/regex matching for common queries, with a fast LLM (claude-3-haiku) as fallback for ambiguous queries.
+**Step 3:** Filtered Vector Retrieval (HNSW Engine)
+The extracted entity ("UK") is injected directly into Chroma DB's lookup query as a search filter:
+
+####  Chroma DB Metadata Search Filter
+```
 search_kwargs = {
     "k": 5,
     "filter": {"country": target_country}
 }
+```
 
-	3.	Chroma DB performs an index lookup only across vectors matching {"country": target_country}.
-Step 4: Connect the Pipeline with LCEL
-Chain the router, retriever, prompt, and LLM together using LangChain Expression Language (LCEL).
-	1.	Input: User asks a question ("How many gold medals did India win in 2020?").
-	2.	Router Execution: Extracts country = "India".
-	3.	Retriever Execution: Queries Chroma DB with filter={"country": "India"} and returns only India-related chunks.
-	4.	Prompt Construction: Combines the filtered chunks + original question into the standard prompt template.
-	5.	LLM Generation: Claude generates the final grounded response.
+**Under the Hood:** Chroma DB uses **HNSW (Hierarchical Navigable Small World)** graph indexing. When a metadata filter is supplied, Chroma performs graph traversal only on vector nodes matching the constraint, achieving total data isolation.
+**Step 4:** LCEL Pipeline Generation
+Using **LangChain Expression Language (LCEL)**, the output of the metadata filter feeds into the final prompt context, returning strictly relevant data to Anthropic's Claude model.
 
-### key technical highlights:
-⚬	Zero Memory Overhead: One shared database connection pool rather than dynamic connection switching across multiple databases.
-⚬	Deterministic Isolation: Guarantees zero "bleed-through" (e.g., query about India will physically never read a UK chunk).
-⚬	Instant Extensibility: To add a 7th or 100th PDF (e.g., olympics_france.pdf), you just run the ingestion pipeline. No code updates, re-indexing, or server restarts required.
+#### 🛠️ Tech Stack: Local vs. Cloud Production Equivalent
+This pipeline mirrors enterprise-grade architecture using 100% free local tools:
+![table](<Screenshot 2026-08-03 at 11.31.44 PM.png>)
 
-Why Chroma DB?
-Chroma DB uses HNSW (Hierarchical Navigable Small World) as its default underlying vector indexing engine.
-When Chroma stores your HuggingFace embeddings locally, it automatically builds an HNSW graph index. When you execute a search with a metadata filter, Chroma performs a filtered HNSW graph traversal, searching only the nodes tagged with {"country": "India"}
-
-🚀 Summary of Your Local Tech Stack
-Component	Production System Equivalent	Your Local Setup (100% Free)
-Vector DB	Enterprise Pinecone / Qdrant Cluster	Local Chroma DB
-Indexing Engine	HNSW Graph Search	Built-in HNSW (Chroma)
-Embeddings	OpenAI text-embedding-3	Local HuggingFace (all-MiniLM-L6-v2)
-Metadata Filter	Cloud Payloads	Native Chroma SQL/Metadata Filters
-LLM Orchestrator	Claude / GPT-4	Anthropic Claude API via LangChain LCEL
-
+####  ⭐ Key Architecture Highlights
+⚬	🔒 Deterministic Isolation: Eliminates data bleed-through. A search about India physically cannot search or return chunks tagged for the UK.
+⚬	⚡ Zero-Overhead Scaling: Adding a 5th or 200th country PDF requires zero server restarts or structural code updates. Just ingest the file with its respective metadata tag.
+⚬	💰 Cost & Latency Optimized: Operates out of a single local database connection pool, drastically reducing memory usage and eliminating multi-database network overhead.
