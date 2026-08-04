@@ -93,6 +93,10 @@ This pipeline mirrors enterprise-grade architecture using 100% free local tools:
 
 ⚬ Capacity & Eviction Strategy: We employ a Bounded FIFO / LRU (Least Recently Used) Eviction Strategy with a default max_capacity = 200 entries. When the cache hits 200 records, the oldest record (self.cache.pop(0)) is automatically evicted from RAM.
 
+#### Architecture diagram:
+![arch-diagram](<ChatGPT Image Aug 4, 2026, 06_12_43 PM.png>)
+
+
 📐 Flow Diagram
                   ┌───────────────────────────────┐
                   │      User Input Prompt        │
