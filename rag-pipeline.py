@@ -1,7 +1,8 @@
 import os
-import sys
-from typing import Optional
+import time
+from typing import Optional, List, Dict
 from pydantic import BaseModel, Field
+import numpy as np
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -24,6 +25,72 @@ COUNTRY_PDF_MAPPING = {
     "Germany": "Olympics_germany.pdf",
     "Japan": "Olympics_japan.pdf",
 }
+# ------------------------------------------------------------------
+# SEMANTIC CACHE CLASS (In-Memory Vector Search)
+# ------------------------------------------------------------------
+class InMemorySemanticCache:
+    """Stores query vectors and responses in RAM to serve rephrased queries in < 5ms."""
+    
+    def __init__(self, embedding_model, similarity_threshold: float = 0.90, max_capacity: int = 200):
+        self.embedding_model = embedding_model
+        self.similarity_threshold = similarity_threshold
+        self.max_capacity = max_capacity
+        self.cache: List[Dict] = []
+
+    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculates normalized cosine similarity between two 1D vectors."""
+        v1, v2 = np.array(vec1, dtype=np.float32), np.array(vec2, dtype=np.float32)
+        norm_v1 = np.linalg.norm(v1)
+        norm_v2 = np.linalg.norm(v2)
+        
+        if norm_v1 == 0 or norm_v2 == 0:
+            return 0.0
+            
+        similarity = np.dot(v1, v2) / (norm_v1 * norm_v2)
+        return float(np.clip(similarity, -1.0, 1.0))  # Prevent precision overflow > 1.0
+
+    def lookup(self, query: str) -> Optional[str]:
+        """Checks if a semantically similar query exists in RAM."""
+        if not self.cache:
+            return None
+
+        # Generate embedding vector for incoming query
+        query_vector = self.embedding_model.embed_query(query)
+        
+        best_score = -1.0
+        best_response = None
+        best_query = None
+
+        # Iterate through all entries saved in RAM
+        for entry in self.cache:
+            score = self._cosine_similarity(query_vector, entry["vector"])
+            if score > best_score:
+                best_score = score
+                best_response = entry["response"]
+                best_query = entry["query"]
+
+        if best_score >= self.similarity_threshold:
+            print(f"\n⚡ [CACHE HIT]: Similarity Score: {best_score:.4f} >= Threshold: {self.similarity_threshold}")
+            print(f"   Matched Original Query: '{best_query}'")
+            return best_response
+
+        print(f"\n💨 [CACHE MISS]: Best Similarity Score was {best_score:.4f} (Required: {self.similarity_threshold})")
+        return None
+
+    def add(self, query: str, response: str):
+        """Saves query vector and LLM response to RAM."""
+        if len(self.cache) >= self.max_capacity:
+            self.cache.pop(0)  # Evict oldest entry (LRU)
+
+        query_vector = self.embedding_model.embed_query(query)
+        self.cache.append({
+            "query": query,
+            "vector": query_vector,
+            "response": response,
+            "timestamp": time.time()
+        })
+        print(f"💾 [Cache Saved]: Successfully saved query to RAM cache. Total entries: {len(self.cache)}")
+
 
 # ------------------------------------------------------------------
 # STEP 1: Load or Initialize Vector DB
@@ -82,28 +149,36 @@ def create_router_chain(llm):
 # ------------------------------------------------------------------
 # STEP 3: RAG Processing Function
 # ------------------------------------------------------------------
-def process_query(query:str, vector_store, router_chain, llm_generator):
-    #1 : Route intent
+def process_query(query: str, vector_store, router_chain, llm_generator, semantic_cache: InMemorySemanticCache):
+    start_time = time.time()
+
+    # 1. Lookup in Cache First
+    cached_response = semantic_cache.lookup(query)
+    if cached_response:
+        elapsed_ms = (time.time() - start_time) * 1000
+        print(f"⏱️ [RAM CACHE] Served response in {elapsed_ms:.2f} ms")
+        return cached_response
+
+    # 2. Cache Miss -> Proceed with Normal Pipeline
+    print("🚀 Running full RAG pipeline...")
     router_output = router_chain.invoke({"question": query})
     target_country = router_output.target_country
 
-    # 2. Configure Dynamic Filter
     search_kwargs = {"k": 5}
     if not target_country:
-        return "I'm sorry, I don't have any data on that. Please try rephrasing your question."
+        print("[System Router]: No specific country detected. Searching globally...")
     else:
-        print(f"\n[System Router]: Detected Country -> '{target_country}'. Applying ChromaDB Filter: {{'country': '{target_country}'}}")
+        print(f"[System Router]: Detected Country -> '{target_country}'. Applying ChromaDB Filter: {{'country': '{target_country}'}}")
         search_kwargs["filter"] = {"country": target_country}
 
     # 3. Retrieve Documents
     retriever = vector_store.as_retriever(search_type="similarity", search_kwargs=search_kwargs)
     retrieved_docs = retriever.invoke(query)
 
-    # Optional debug logging for source verification
     sources = set(d.metadata.get('source', 'Unknown') for d in retrieved_docs)
     print(f"[Vector Search]: Filtered lookup returned {len(retrieved_docs)} chunks from {list(sources)}")
 
-    #4. Generate response
+    # 4. Generate Response
     rag_prompt_template = ChatPromptTemplate.from_template(
         """
         You are an expert Olympic Assistant. Answer the user's question clearly and concisely using ONLY the provided context.
@@ -122,6 +197,13 @@ def process_query(query:str, vector_store, router_chain, llm_generator):
     chain = rag_prompt_template | llm_generator | StrOutputParser()
 
     response = chain.invoke({"context": formatted_context, "question": query})
+
+    # 5. Store in RAM Cache AFTER response generation
+    semantic_cache.add(query, response)
+
+    elapsed_s = time.time() - start_time
+    print(f"⏱️ [Full Pipeline] Executed in {elapsed_s:.2f} seconds")
+
     return response
 
 # ------------------------------------------------------------------
@@ -129,6 +211,13 @@ def process_query(query:str, vector_store, router_chain, llm_generator):
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
+    
+    # 1. Initialize Embeddings ONCE
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    
+    # 2. Instantiate Semantic Cache ONCE (Persists in RAM across loop iterations)
+    semantic_cache = InMemorySemanticCache(embedding_model=embeddings, similarity_threshold=0.90)
+    # 3. Initialize LLM & Vector Store
     llm = ChatAnthropic(model="claude-sonnet-4-5-20250929")
     vector_store = initialize_vector_store()
     router_chain = create_router_chain(llm)
@@ -142,5 +231,5 @@ if __name__ == "__main__":
         if query.lower() in ["exit", "quit"]:
             print("👋 Goodbye!")
             break
-        response = process_query(query, vector_store, router_chain, llm)
+        response = process_query(query, vector_store, router_chain, llm, semantic_cache=semantic_cache)
         print("\n[Response]:", response)

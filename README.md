@@ -79,5 +79,62 @@ This pipeline mirrors enterprise-grade architecture using 100% free local tools:
 
 ####  ⭐ Key Architecture Highlights
 ⚬	🔒 Deterministic Isolation: Eliminates data bleed-through. A search about India physically cannot search or return chunks tagged for the UK.
+
 ⚬	⚡ Zero-Overhead Scaling: Adding a 5th or 200th country PDF requires zero server restarts or structural code updates. Just ingest the file with its respective metadata tag.
+
 ⚬	💰 Cost & Latency Optimized: Operates out of a single local database connection pool, drastically reducing memory usage and eliminating multi-database network overhead.
+
+
+
+#### 🔑 Cache Architecture Overview
+⚬ Cache Strategy & Type: We are using an **In-Memory Vector-Based Semantic Cache**. Instead of requiring exact string matches, it converts incoming queries into 384-dimensional dense vectors and evaluates Cosine Similarity against previously stored prompt vectors in RAM using a strict threshold of \ge 0.90 (90%).
+
+⚬ Libraries Used: ⚬ langchain-huggingface (all-MiniLM-L6-v2) to generate query vector embeddings locally. ⚬ **NumPy** for fast, vectorised linear algebra (dot products and vector norms) to calculate cosine similarity in RAM.
+
+⚬ Capacity & Eviction Strategy: We employ a Bounded FIFO / LRU (Least Recently Used) Eviction Strategy with a default max_capacity = 200 entries. When the cache hits 200 records, the oldest record (self.cache.pop(0)) is automatically evicted from RAM.
+
+📐 Flow Diagram
+                  ┌───────────────────────────────┐
+                  │      User Input Prompt        │
+                  └───────────────┬───────────────┘
+                                  │
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │ Vectorize Query via Local HF  │
+                  │   Embedding Model (384-dim)   │
+                  └───────────────┬───────────────┘
+                                  │
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │ Compute Cosine Similarity vs. │
+                  │     Cached Vectors in RAM     │
+                  └───────────────┬───────────────┘
+                                  │
+             ┌────────────────────┴────────────────────┐
+  SIMILARITY ≥ 0.90                                SIMILARITY < 0.90
+     (CACHE HIT)                                      (CACHE MISS)
+             │                                                │
+             ▼                                                ▼
+┌─────────────────────────┐                     ┌───────────────────────────┐
+│ Return Cached Response  │                     │ Execute Full RAG Pipeline:│
+│  (Served in < 5 ms)     │                     │ 1. Metadata Router        │
+└─────────────────────────┘                     │ 2. Filtered ChromaDB      │
+                                                │ 3. Claude LLM Generation  │
+                                                └─────────────┬─────────────┘
+                                                              │
+                                                              ▼
+                                                ┌───────────────────────────┐
+                                                │ Store Prompt Vector &     │
+                                                │ Result in RAM (LRU Queue) │
+                                                └───────────────────────────┘
+
+💻 Code Explanation
+1. Similarity Computation (_cosine_similarity): v1, v2 = np.array(vec1), np.array(vec2) return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))  Uses NumPy to divide the inner product of two embedding vectors by the product of their Euclidean lengths, yielding a score between 0.0 (unrelated) and 1.0 (identical context).
+
+2. Cache Lookup (lookup): Converts the user's string query into an embedding vector, iterates over stored cache entries, and extracts the highest-scoring match. If best_score >= 0.90, it returns the stored answer immediately—bypassing ChromaDB and Claude entirely.
+
+3. Cache Storage & Eviction (add): if len(self.cache) >= self.
+max_capacity:     self.cache.pop(0)  Checks memory bounds before saving. If the list exceeds 200 entries, it pops index 0 (the oldest item) to prevent unconstrained RAM growth.
+
+After cache implementation, here is the output:
+![cache-output](<Screenshot 2026-08-04 at 4.16.23 PM.png>)
