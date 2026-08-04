@@ -8,6 +8,8 @@ A lightweight, enterprise-ready Retrieval-Augmented Generation (RAG) system buil
 Because real-world web PDFs are often noisy, poorly formatted, or buried across hundreds of sites, I conceptualized and built my own structured dataset from scratch:
 ⚬	**Generation Method:** Initially, Used Google Gemini to generate clean, text-searchable historical data spanning 1900 to present for 4 initial countries: India 🇮🇳, Great Britain 🇬🇧, USA 🇺🇸, and China 🇨🇳.
 ⚬	**Future-Proofing:**  Formatted the dataset explicitly to test clean text-splitting and metadata isolation before scaling to more nations.
+How to run single PDF rag?
+`uv run main.py`
 
 This is an output of a single PDF document reading(Simple system): 
  ![output](<Screenshot 2026-08-03 at 9.35.43 PM.png>)
@@ -15,6 +17,11 @@ This is an output of a single PDF document reading(Simple system):
  Now I want to convert this application to real-time enterprise systems handle multi-document/multi-entity RAG. We can achieve this by following  **Single-Index Metadata-Filtered RAG** pattern .
 
  I added 2 more countries and total 6 countries with separate PDF's like Olympic_india.pdf, Olympic_uk.pdf, Olympic_usa.pdf, Olympic_germany.pdf, Olympic_japan.pdf, Olympics_china.pdf and not single PDF(Olympics.pdf).
+
+#### How to run Single-Index Metadata-Filtered RAG?
+`uv run rag-pipeline.py`
+ **Single-Index Metadata-Filtered RAG Output**
+ ![final-output](<Screenshot 2026-08-04 at 2.59.33 PM.png>)
 
  #### 🏗️ From Idea to Production Architecture
 The Naive Approach vs. Production Standard
